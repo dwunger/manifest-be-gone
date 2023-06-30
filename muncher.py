@@ -231,11 +231,14 @@ def run_as_admin():
             
     
 if __name__ == "__main__":
-    run_as_admin()
+    choice = input("This process needs elevated priveleges to handle read-only file management.\n This may safely be dismissed while retaining partial functionality. Run as admin? Y/n").strip().lower()
+    if choice != '':
+        if choice in 'yes':
+            run_as_admin()
     enable_ansi_colors()
     muncher = Muncher()
     muncher.remove_manifest_list(muncher.unlinked_manifests)
-    input()
-
+    input() #Blocking exit
+    
     # steam_app_id_manager = SteamAppIDManager()
 
