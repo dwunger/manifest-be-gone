@@ -6,6 +6,8 @@ import subprocess
 import requests
 from datetime import datetime
 import yaml
+import sys
+import ctypes
 
 class SteamAppIDManager:
     #! Not used in production. Appmanifests provide relative install path
@@ -54,9 +56,11 @@ class SteamAppIDManager:
 class Muncher:
     LIBRARY_PATH_FILE = "steam_libs.yaml"
     def __init__(self):
+        self.scrap_files = []
         self.drives = self.get_disks()
         self.libraries = self.retrieve_libraries(self.drives)
         self.unlinked_manifests = self.load_manifests(self.libraries)
+        
 
     def get_disks(self): 
         '''['C:\\', 'D:\\']'''
@@ -83,7 +87,7 @@ class Muncher:
             for common_path in common_paths:
                 if os.path.exists(os.path.join(drive, common_path)):
                     libraries.append(os.path.join(drive, common_path)) 
-        print(f"Found {len(libraries)} Steam libraries!")
+        print(f"\033[92;1mFound\033[0m \033[1m{len(libraries)}\033[0m \033[92;1mSteam libraries!\033[0m")
         return libraries
 
     def retrieve_libraries(self, drives, update=True):
@@ -94,8 +98,29 @@ class Muncher:
                 return yaml.safe_load(f)
         else:
             return self.find_libraries(drives)
+        
+    @staticmethod
+    def is_ghost_directory(directory):
+        '''Bool if directory is < 2KB -> True'''
+        #!Some older games may store saves in installation directory.
+        #!Threshold is arbitrary, but unlikely to delete these saves at 2KB
+        size = 0
+        positive_thres = 2 #kb
+        if len(os.listdir(directory)) == 0:
+            return True
+        for dirpath, dirnames, filenames in os.walk(directory):
+            for f in filenames:
+                if size > positive_thres:
+                    return False #early return
+                fp = os.path.join(dirpath, f)
+                # skip if it is symbolic link
+                if not os.path.islink(fp):
+                    size += os.path.getsize(fp)/1024
+        return size < positive_thres  # bool size is less than 2KB
+
     @staticmethod
     def get_game_dir(manifest_path):
+        '''manifest path -> installation directory'''
         common_dir = os.path.join(os.path.dirname(manifest_path), 'common')
         with open(manifest_path, 'r') as f:
             lines = f.readlines()
@@ -106,8 +131,9 @@ class Muncher:
                 game_dir = line.lstrip().lstrip('\"').rstrip().rstrip('\"')
                 break
         return game_dir
-    @staticmethod
-    def is_unlinked(manifest_path):
+    
+    
+    def is_unlinked(self, manifest_path):
         common_dir = os.path.join(os.path.dirname(manifest_path), 'common')
         with open(manifest_path, 'r') as f:
             lines = f.readlines()
@@ -118,7 +144,9 @@ class Muncher:
                 game_dir = line.lstrip().lstrip('\"').rstrip().rstrip('\"')
                 break
         game_dir = os.path.join(common_dir,game_dir)
-        # print(game_dir, not os.path.exists(game_dir))
+        if os.path.exists(game_dir):
+            if Muncher.is_ghost_directory(game_dir):
+                self.scrap_files.extend([game_dir, manifest_path])
         return not os.path.exists(game_dir)
     
     def load_manifests(self, libraries):
@@ -127,38 +155,87 @@ class Muncher:
         for library in libraries:
             library_manifest_paths = [os.path.join(library, appman) for appman in os.listdir(library) if appman.startswith('appmanifest_') and appman.endswith(".acf")]
             manifest_paths.extend(library_manifest_paths)
-        print(f"Found {len(manifest_paths)} app manifests!")
+        print(f"\033[92;1mFound\033[0m \033[1m{len(manifest_paths)}\033[0m \033[92;1m app manifests!\033[0m")
         for manifest_path in manifest_paths:
-            if Muncher.is_unlinked(manifest_path):
+            if self.is_unlinked(manifest_path):
                 unlinked_manifest_paths.append(manifest_path)
         return unlinked_manifest_paths
     
     def remove_manifest_list(self, unlinked_manifests):
-        print(f"{len(unlinked_manifests)} unlinked manifest files were found. \n Would you like to review them?")
-        choice = input("(Y/n)")
-        if choice.lower() in "yes":
-            for manifest in unlinked_manifests:
-                print(f"{manifest} : ({Muncher.get_game_dir(manifest)})")
-        elif choice.lower == "":
-            for manifest in unlinked_manifests:
-                print(f"{manifest} : ({Muncher.get_game_dir(manifest)})")            
+        if len(unlinked_manifests) > 0:
+            print(f"\033[91m{len(unlinked_manifests)} unlinked manifest files were found. Would you like to review them?\033[0m")
+            choice = input("\033[1m(Y/n)\033[0m").strip().lower()
+            if choice.startswith('y') or choice == "":  
+                for manifest in unlinked_manifests:
+                    print(f"{manifest} : ({Muncher.get_game_dir(manifest)})")        
+            else:
+                print("No.")       
+            print(f"\033[91mDelete {len(unlinked_manifests)} unlinked manifests?\033[0m")
+            choice = input("\033[1m(N/y)\033[0m").strip().lower()
+            if choice.startswith('y'):  
+                for manifest in unlinked_manifests:
+                    if os.path.isfile(manifest):
+                        os.remove(manifest)
+            else:  
+                print("No changes were made.")
+        
+        elif len(self.scrap_files) > 0:
+            print(f"\033[91mSome scraps appear to be remaining from partial uninstallations. View these? (Y/n) Affected files: {len(self.scrap_files)}\033[0m")
+            choice = input("\033[1m(Y/n)\033[0m").strip().lower()
+            if choice.startswith('y') or choice == "":  
+                for idx in range(0, len(self.scrap_files), 2):
+                    if idx + 1 < len(self.scrap_files):
+                        manifest = os.path.basename(self.scrap_files[idx+1])
+                        manifest.strip().removeprefix("appmanifest_").removesuffix(".acf")
+                        print(self.scrap_files[idx], '→', manifest)
+                    else:
+                        print(self.scrap_files[idx]) #scrap files should be in pairs, but print everything to be safe
+            choice = input("\033[91mRemove these entries?\033[0m \033[1m(N/y)\033[0m").strip().lower()
+            if choice.startswith('y'):  
+                count = len(self.scrap_files)
+                for scrap_path in self.scrap_files:
+                    if os.path.exists(scrap_path):
+                        try:
+                            os.popen(f'del /F /Q "{scrap_path}"')
+                        except Exception as e:
+                            print("An error occurred:", str(e))
+                print(f"\033[91mRemoved {count} scraps!\033[0m")
+            else:  
+                print("\033[91mNo changes were made.\033[0m")
         else:
-            print("No.")
-            
-        print(f"Delete {len(unlinked_manifests)} unlinked manifests?")
-        choice = input("(y/N)")
-        if choice.lower() in "yes":
-            for manifest in unlinked_manifests:
-                if os.path.isfile(manifest):
-                    os.remove(manifest)
-        else:
-            print("No changes were made.")
+            print("\033[92;1mAll Steam Libraries appear clean!\033[0m")
+def enable_ansi_colors():
+    if sys.platform.startswith('win'):
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
 
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+def run_as_admin():
+    if not is_admin():
+        if sys.platform.startswith('win'):
+            try:
+                ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+                sys.exit(0)
+            except Exception as e:
+                print("Failed to elevate process:", e)
+                sys.exit(1)
+        else:
+            print("Elevation is only supported on Windows.")
+    else:
+        print("Already running as admin.")
             
     
 if __name__ == "__main__":
+    run_as_admin()
+    enable_ansi_colors()
     muncher = Muncher()
     muncher.remove_manifest_list(muncher.unlinked_manifests)
+    input()
 
     # steam_app_id_manager = SteamAppIDManager()
 
